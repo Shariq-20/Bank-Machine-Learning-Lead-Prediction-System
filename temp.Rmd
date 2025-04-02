@@ -1,0 +1,329 @@
+
+```{r}
+#Read all the packages that will be used for the project
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(ROSE) 
+library(mltools)
+library(data.table)
+library(splitstackshape)
+library(C50)
+library(FSelector)
+library(e1071)
+library(mice)
+library(adabag)
+library(pROC)
+library(randomForest)
+library(CustomerScoringMetrics)
+
+```
+
+# Import Data & Data Checking
+```{r}
+#Importing Data
+data = read.csv("assignment_data.csv" )
+
+#Checking data structure
+str(data)
+summary(data)
+data_np <- data
+
+```
+
+
+#Data Preparation
+
+
+```{r}
+
+#Using MICE technique to replace the value with wrong levels in Dependent variable
+#Converting the -1 value in dependent into missing value
+data_np$Dependent <- ifelse(data_np$Dependent == -1, NA, data_np$Dependent)
+
+summary(data_np)
+
+unique_values <- unique(data_np$Dependent)
+
+# Print the unique values
+print(unique_values)
+
+#Calculating the missing value data in Dependent variable
+( missing_percentage <- sum(is.na(data_np$Dependent))* 100/ length(data_np$Dependent) )
+
+#Converting categorical data into factor
+data_np$Dependent <- as.factor(data_np$Dependent)
+data_np$Target <- as.factor(data_np$Target)
+
+#Removing non informative variable
+data_np$ID <- NULL
+
+#Replacing the missing value data in Dependent variable using MICE package
+imputed_data <- mice(data_np[, -which(names(data_np) == "Target")], 
+                      m = 5, 
+                      maxit = 50, 
+                      method = 'pmm', 
+                      seed = 500)
+data.imputed <- complete(imputed_data, 1)
+table(data$Dependent, useNA='ifany')
+table(data.imputed$Dependent, useNA='ifany')
+
+```
+
+
+```{r}
+
+#Replacing the NA values using MICE techniques
+#Calculating the missing value data in credit product variable
+( missing_percentage_credit <- sum(is.na(data_np$Credit_Product))* 100/ length(data_np$Credit_Product) )
+
+#Converting credit product into categorical variable
+data_np$Credit_Product <- as.factor(data_np$Credit_Product)
+
+#Replacing the missing value data in Dependent variable using MICE package
+imputed_data_credit <- mice(data_np[, -which(names(data_np) == "Target")], 
+                      m = 5, 
+                      maxit = 50, 
+                      method = 'pmm', 
+                      seed = 500)
+data.imputed_credit <- complete(imputed_data_credit, 1)
+
+table(data_np$Credit_Product, useNA='ifany')
+
+table(data.imputed_credit$Credit_Product, useNA='ifany')
+
+data_np$Dependent <- data.imputed$Dependent
+data_np$Credit_Product <- data.imputed_credit$Credit_Product
+
+#Final check on data structure
+summary(data_np)
+
+
+```
+
+#Data Partition
+
+```{r}
+
+set.seed(123)
+
+# Partition the dataset into training and test sets
+# index keeps the record indices for the training data
+index = createDataPartition(data_np$Target, p = 0.7 , list = FALSE)
+
+# Generate training and test data
+training = data_np[index, ]
+test = data_np[-index, ]
+
+# checking the distribution of target variable
+
+prop.table(table(data_np$Target))
+
+prop.table(table(training$Target))
+
+prop.table(table(test$Target))
+
+
+```
+
+#Sampling training data for modelling
+
+```{r}
+
+#Using undersampling method 
+undersampled_n <- ovun.sample(Target ~ ., data = training, method = "under" , p= 0.5, seed= 1)$data
+
+#Checking the distribution of the target variable
+prop.table(table(undersampled_n$Target))
+
+```
+
+# Modelling
+
+Four techniques are used for modelling
+
+1. AdaBoost
+```{r}
+#Building the AdaBoost model using boosting function
+adaboost_model <- boosting(Target~., data = undersampled_n, boos = TRUE, mfinal = 20)
+print(adaboost_model)
+
+#Predicting the Training Data based on the AdaBoost model
+adaboost_training_predict <- predict(adaboost_model, undersampled_n, probability = TRUE)
+
+#Predicting the test data based on the AdaBoost model
+adaboost_predict <- predict(adaboost_model, test, probability = TRUE)
+```
+2. Random Forest
+
+```{r}
+set.seed(1)
+
+#Building the random forest model using random forest function
+model_RF <- randomForest(Target~.,undersampled_n )
+print(model_RF)
+
+
+#Predicting the test data based on the random forest model
+prob_RF <- predict(model_RF, test, type = "prob")
+pred_rf<-predict(model_RF,test)
+
+#Model Tuning for random forest
+#Converting the data into factor
+tune_data <- undersampled_n
+tune_data$Gender <- as.factor(tune_data$Gender)
+tune_data$Region_Code <- as.factor(tune_data$Region_Code)
+tune_data$Occupation <- as.factor(tune_data$Occupation)
+tune_data$Channel_Code <- as.factor(tune_data$Channel_Code)
+tune_data$Credit_Product <- as.factor(tune_data$Credit_Product)
+tune_data$Account_Type <- as.factor(tune_data$Account_Type)
+tune_data$Active <- as.factor(tune_data$Active)
+
+#Using the tune function to tune random forest
+tuned_rf <- randomForestSRC::tune(
+  Target ~ ., 
+  data = tune_data,
+  ntree = 500,
+  mtryStart = sqrt(ncol(tune_data)),   
+  nodesizeTry = seq(1, 10, by = 2), 
+  stepFactor = 1.25, 
+  improve = 0.001
+)
+
+# View the results to see the best hyperparameters
+tuned_rf$optimal
+
+#Building random forest model based on the tuning result
+
+bestRF <-  randomForest(Target~., undersampled_n, mtry = 10, nodesize = 25)
+
+#Predicting the random forest model on training data
+RF_training_pred <- predict(bestRF, undersampled_n)
+
+#Predicting the random forest model on test data
+RF_tunedpred <- predict(bestRF, test)
+RF_tuneprob <- predict(bestRF, test, type = "prob")
+```
+
+3. SVM
+
+```{r}
+#Building the SVM model using SVM function
+svm_model <- svm(Target ~., data = undersampled_n , kernal = "radial", scale = TRUE, probability = TRUE)
+print(svm_model)
+
+#Predicting the SVM on training data
+svm_training_pred <- predict(svm_model, undersampled_n, probability = TRUE)
+
+#Predicting the SVM on test data
+svm_predict <- predict(svm_model, test, probability = TRUE)
+svm_prob <- attr(svm_predict, "probabilities")
+
+```
+
+4. Logistic Regression
+
+```{r}
+#Building the logistic regression model using glm function
+Log_Reg <- glm(Target~., undersampled_n , family = "binomial") 
+
+#Predicting the logistics regression on test data
+log_reg_pred_train <- predict(Log_Reg, undersampled_n, type = "response")
+
+# Predicting the class of the data based on threshold of 0.5 
+log_reg_class_train <- ifelse(log_reg_pred_train > 0.5, 1, 0)
+log_reg_class_train <- as.factor(log_reg_class_train)
+
+#Predicting the logistics regression on test data
+log_reg_pred <- predict(Log_Reg, test, type = "response")
+
+# Predicting the class of the data based on threshold of 0.5 
+log_reg_class <- ifelse(log_reg_pred > 0.5, 1, 0)
+log_reg_class <- as.factor(log_reg_class)
+```
+
+# Information Gain
+```{r}
+#Calculating the information gain for each independent variable
+weights <- information.gain(Target ~., undersampled_n)
+weights$attr <- rownames(weights)
+weights <- arrange(weights, -weights$attr_importance)
+
+#Building plot for information gain
+ggplot(weights, aes(y = attr_importance, x = fct_reorder(attr, attr_importance))) + 
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(y = "Information Gain", x = "Variables", title = "Information Gain of Independent Variables")
+
+```
+
+
+# Model Evaluation 
+
+Model is evaluated using confusion matrix by aiming highest recall value
+
+1. Confusion Matrix on Training Data
+
+```{r}
+
+#Confusion matrix for each model
+confusionMatrix(as.factor(adaboost_training_predict$class), undersampled_n$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(RF_training_pred, undersampled_n$Target, positive='1', mode = "prec_recall")
+confusionMatrix(svm_training_pred, undersampled_n$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(log_reg_class_train, undersampled_n$Target, positive = "1", mode = "prec_recall")
+
+```
+
+2. Confusion Matrix on Test Data
+
+```{r}
+
+#Confusion matrix for each model
+confusionMatrix(as.factor(adaboost_predict$class), test$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(RF_tunedpred, test$Target, positive='1', mode = "prec_recall")
+confusionMatrix(svm_predict, test$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(log_reg_class, test$Target, positive = "1", mode = "prec_recall")
+
+
+```
+
+3. ROC graph
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Building the ROC graph
+ROC_adaboost <- roc(test$Target, adaboost_predict$prob[,2])
+ROC_rf <- roc(test$Target, RF_tuneprob[,2])
+ROC_svm <- roc(test$Target, svm_prob[,2])
+ROC_log <- roc(test$Target, log_reg_pred)
+
+#Building ROC graph
+ggroc(list(Adaboost = ROC_adaboost, Random_Forest = ROC_rf, SVM = ROC_svm, Logistic_Regression = ROC_log), legacy.axes = TRUE) +
+  labs(x = "FPR", y = "TPR") + 
+  geom_abline(intercept = 0, slope = 1, color = "black", linetype = "dashed") +
+  ggtitle("Receiver Operator Characteristics (ROC) Graph")
+
+
+#Calculating the area under the curve
+auc(ROC_adaboost)
+auc(ROC_rf)
+auc(ROC_svm)
+auc(ROC_log)
+```
+
+
+4. Cumulative Gain Chart
+
+```{r}
+
+GainTable_RF <- cumGainsTable(RF_tuneprob[,2], test$Target, resolution = 1/100)
+GainTable_RF <- as.data.frame(GainTable_RF)
+
+ggplot(GainTable_RF, aes(x = Percentile, y = cumGainsPercentage)) + 
+  geom_line(col = "orange") +
+  labs(x = "%Test Instances (Data)", y = "%Correct Prediction", title = "Cumulative Gain Chart", subtitle = "Model: Random Forest Model") +
+  geom_abline(intercept = 0, slope = 1, color = "black", linetype = "dashed")
+
+
+```
+
+

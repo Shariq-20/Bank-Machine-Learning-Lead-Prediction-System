@@ -1,0 +1,466 @@
+
+```{r}
+#Read all the packages that will be used for the project
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(ROSE) 
+library(mltools)
+library(data.table)
+library(splitstackshape)
+library(C50)
+library(FSelector)
+library(e1071)
+library(mice)
+library(adabag)
+library(pROC)
+library(randomForest)
+
+```
+
+# Import Data & Data Checking
+```{r}
+#Importing Data
+data = read.csv("assignment_data.csv" )
+
+#Checking data structure
+str(data)
+summary(data)
+data_np <- data
+
+```
+
+#Data Exploration
+
+```{r}
+
+
+## applying one hot encoding to occupation column 
+#Data_DE <- one_hot(as.data.table(Data_DE), cols = "Occupation")
+
+#summary(Data_DE)
+
+# Correlation Matrix
+numeric_data <- data[sapply(data, is.numeric)]
+correlation_matrix <- cor(numeric_data)
+
+melted_corr <- melt(correlation_matrix)
+
+ggplot(data = melted_corr, aes(Var1, Var2, fill = value, label = round(value, 2))) +
+  geom_tile(color = "white") +
+  geom_text(size = 3) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(title = "Correlation Heatmap") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(title = "Correlation"))
+
+#occupation-account type graph
+
+Data_DE <- data
+
+# applied label encoding considering that the Account Type column has ordinal nature 
+#Data_DE$Account_Type <- recode(Data_DE$Account_Type, "Silver" = 1, "Gold"= 2, "Platinum" = 3)
+
+Data_DE <- Data_DE %>% mutate (Account_Type, Account.Type = 1)
+
+Data_DEX <- Data_DE %>% group_by(Occupation, Account_Type) %>% summarise(Total_Accounts = sum(Account.Type))
+
+ggplot(Data_DEX)+ geom_boxplot(mapping= aes(x=Account_Type, y= Total_Accounts , colour = as.factor(Account_Type)), width= 0.5) + facet_grid(~Occupation)+ labs(title = "Account Type by Ocupation") +
+  ylab("Account Holders") + xlab("Account Type")
+
+
+
+```
+
+
+
+#Data Preparation
+
+
+```{r}
+
+#Using MICE technique to replace the value with wrong levels in Dependent variable
+#Converting the -1 value in dependent into missing value
+data_np$Dependent <- ifelse(data_np$Dependent == -1, NA, data_np$Dependent)
+
+summary(data_np)
+
+unique_values <- unique(data_np$Dependent)
+
+# Print the unique values
+print(unique_values)
+
+#Calculating the missing value data in Dependent variable
+( missing_percentage <- sum(is.na(data_np$Dependent))* 100/ length(data_np$Dependent) )
+
+#Converting categorical data into factor
+data_np$Dependent <- as.factor(data_np$Dependent)
+data_np$Target <- as.factor(data_np$Target)
+
+#Removing non informative variable
+data_np$ID <- NULL
+
+#Replacing the missing value data in Dependent variable using MICE package
+imputed_data <- mice(data_np[, -which(names(data_np) == "Target")], 
+                      m = 5, 
+                      maxit = 50, 
+                      method = 'pmm', 
+                      seed = 500)
+data.imputed <- complete(imputed_data, 1)
+table(data$Dependent, useNA='ifany')
+table(data.imputed$Dependent, useNA='ifany')
+
+```
+
+
+```{r}
+
+#Replacing the NA values using MICE techniques
+#Calculating the missing value data in credit product variable
+( missing_percentage_credit <- sum(is.na(data_np$Credit_Product))* 100/ length(data_np$Credit_Product) )
+
+#Converting credit product into categorical variable
+data_np$Credit_Product <- as.factor(data_np$Credit_Product)
+
+#Replacing the missing value data in Dependent variable using MICE package
+imputed_data_credit <- mice(data_np[, -which(names(data_np) == "Target")], 
+                      m = 5, 
+                      maxit = 50, 
+                      method = 'pmm', 
+                      seed = 500)
+data.imputed_credit <- complete(imputed_data_credit, 1)
+
+table(data_np$Credit_Product, useNA='ifany')
+
+table(data.imputed_credit$Credit_Product, useNA='ifany')
+
+data_np$Dependent <- data.imputed$Dependent
+data_np$Credit_Product <- data.imputed_credit$Credit_Product
+
+#Final check on data structure
+summary(data_np)
+
+
+```
+
+#Data Partition
+
+```{r}
+
+set.seed(123)
+
+# Partition the dataset into training and test sets
+# index keeps the record indices for the training data
+index = createDataPartition(data_np$Target, p = 0.7 , list = FALSE)
+
+# Generate training and test data
+training = data_np[index, ]
+test = data_np[-index, ]
+
+# checking the distribution of target variable
+
+prop.table(table(data_np$Target))
+
+prop.table(table(training$Target))
+
+prop.table(table(test$Target))
+
+
+```
+
+#Sampling training data for modelling
+
+```{r}
+
+#Using undersampling method 
+undersampled_n <- ovun.sample(Target ~ ., data = training, method = "under" , p= 0.5, seed= 1)$data
+
+#Checking the distribution of the target variable
+prop.table(table(undersampled_n$Target))
+
+```
+
+# Modelling
+
+Four techniques are used for modelling
+
+1. AdaBoost
+```{r}
+#Building the AdaBoost model using boosting function
+adaboost_model <- boosting(Target~., data = undersampled_n, boos = TRUE, mfinal = 20)
+print(adaboost_model)
+
+#Predicting the Training Data based on the AdaBoost model
+adaboost_training_predict <- predict(adaboost_model, undersampled_n, probability = TRUE)
+
+#Predicting the test data based on the AdaBoost model
+adaboost_predict <- predict(adaboost_model, test, probability = TRUE)
+```
+2. Random Forest
+
+```{r}
+set.seed(1)
+
+#Building the random forest model using random forest function
+model_RF <- randomForest(Target~.,undersampled_n )
+print(model_RF)
+
+
+#Predicting the test data based on the random forest model
+prob_RF <- predict(model_RF, test, type = "prob")
+pred_rf<-predict(model_RF,test)
+
+#Model Tuning for random forest
+#Converting the data into factor
+tune_data <- undersampled_n
+tune_data$Gender <- as.factor(tune_data$Gender)
+tune_data$Region_Code <- as.factor(tune_data$Region_Code)
+tune_data$Occupation <- as.factor(tune_data$Occupation)
+tune_data$Channel_Code <- as.factor(tune_data$Channel_Code)
+tune_data$Credit_Product <- as.factor(tune_data$Credit_Product)
+tune_data$Account_Type <- as.factor(tune_data$Account_Type)
+tune_data$Active <- as.factor(tune_data$Active)
+
+#Using the tune function to tune random forest
+tuned_rf <- randomForestSRC::tune(
+  Target ~ ., 
+  data = tune_data,
+  ntree = 300,
+  mtryStart = sqrt(ncol(tune_data)),   
+  nodesizeTry = seq(1, 10, by = 2), 
+  stepFactor = 1.25, 
+  improve = 0.001
+)
+
+# View the results to see the best hyperparameters
+tuned_rf$optimal
+
+#Building random forest model based on the tuning result
+bestRF <-  randomForest(Target~., undersampled_n, mtry = 7, nodesize = 1)
+
+#Predicting the random forest model on training data
+RF_training_pred <- predict(bestRF, undersampled_n)
+
+#Predicting the random forest model on test data
+RF_tunedpred <- predict(bestRF, test)
+RF_tuneprob <- predict(bestRF, test, type = "prob")
+
+```
+
+3. SVM
+
+```{r}
+#Building the SVM model using SVM function
+svm_model <- svm(Target ~., data = undersampled_n , kernal = "radial", scale = TRUE, probability = TRUE)
+print(svm_model)
+
+#Predicting the SVM on training data
+svm_training_pred <- predict(svm_model, undersampled_n, probability = TRUE)
+
+#Predicting the SVM on test data
+svm_predict <- predict(svm_model, test, probability = TRUE)
+svm_prob <- attr(svm_predict, "probabilities")
+
+```
+
+4. Logistic Regression
+
+```{r}
+#Building the logistic regression model using glm function
+Log_Reg <- glm(Target~., undersampled_n , family = "binomial") 
+
+#Predicting the logistics regression on test data
+log_reg_pred_train <- predict(Log_Reg, undersampled_n, type = "response")
+
+# Predicting the class of the data based on threshold of 0.5 
+log_reg_class_train <- ifelse(log_reg_pred_train > 0.5, 1, 0)
+log_reg_class_train <- as.factor(log_reg_class_train)
+
+#Predicting the logistics regression on test data
+log_reg_pred <- predict(Log_Reg, test, type = "response")
+
+# Predicting the class of the data based on threshold of 0.5 
+log_reg_class <- ifelse(log_reg_pred > 0.5, 1, 0)
+log_reg_class <- as.factor(log_reg_class)
+```
+
+# Information Gain
+```{r}
+#Calculating the information gain for each independent variable
+weights <- information.gain(Target ~., undersampled_n)
+weights$attr <- rownames(weights)
+weights <- arrange(weights, -weights$attr_importance)
+
+#Building plot for information gain
+ggplot(weights, aes(y = attr_importance, x = fct_reorder(attr, attr_importance))) + 
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(y = "Information Gain", x = "Variables", title = "Information Gain of Independent Variables")
+
+```
+
+
+# Model Evaluation 
+
+Model is evaluated using confusion matrix by aiming highest recall value
+
+1. Confusion Matrix on Training Data
+
+```{r}
+
+#Confusion matrix for each model
+confusionMatrix(as.factor(adaboost_training_predict$class), undersampled_n$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(RF_training_pred, undersampled_n$Target, positive='1', mode = "prec_recall")
+confusionMatrix(svm_training_pred, undersampled_n$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(log_reg_class_train, undersampled_n$Target, positive = "1", mode = "prec_recall")
+
+```
+
+2. Confusion Matrix on Test Data
+
+```{r}
+
+#Confusion matrix for each model
+confusionMatrix(as.factor(adaboost_predict$class), test$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(RF_tunedpred, test$Target, positive='1', mode = "prec_recall")
+confusionMatrix(svm_predict, test$Target, positive = "1", mode = "prec_recall")
+confusionMatrix(log_reg_class, test$Target, positive = "1", mode = "prec_recall")
+
+
+```
+
+3. ROC graph
+
+```{r}
+#Building the ROC graph
+ROC_adaboost <- roc(test$Target, adaboost_predict$prob[,2])
+ROC_rf <- roc(test$Target, RF_tuneprob[,2])
+ROC_svm <- roc(test$Target, svm_prob[,2])
+ROC_log <- roc(test$Target, log_reg_pred)
+
+#Building ROC graph
+ggroc(list(Adaboost = ROC_adaboost, Random_Forest = ROC_rf, SVM = ROC_svm, Logistic_Regression = ROC_log), legacy.axes = TRUE) +
+  labs(x = "FPR", y = "TPR") + 
+  geom_abline(intercept = 0, slope = 1, color = "black", linetype = "dashed") +
+  ggtitle("Receiver Operator Characteristics (ROC) Graph")
+
+#Calculating the area under the curve
+auc(ROC_adaboost)
+auc(ROC_rf)
+auc(ROC_svm)
+auc(ROC_log)
+```
+
+
+4. Cumulative Gain Chart
+
+```{r}
+#Creating table for cumulative gain chart
+RF_predict_prob <- as.data.frame(RF_tuneprob)
+colnames(RF_predict_prob) <- c("Prob0", "Prob1")
+
+#Removing the probability of target 0 column
+RF_predict_prob$Prob0 <- NULL
+
+#Re-arranging the probability of target 1 on descending order
+RF_predict_prob$Target <- RF_tunedpred
+RF_predict_prob <- RF_predict_prob %>%
+  arrange(desc(Prob1))
+RF_predict_prob$Target <- as.integer(RF_predict_prob$Target)
+RF_predict_prob$Target <- RF_predict_prob$Target %>%
+  replace(RF_predict_prob$Target == 1, 0) %>%
+  replace(RF_predict_prob$Target == 2, 1)
+
+#Calculating the cummulative total for the probability and instances
+RF_predict_prob$CumSum <- cumsum(RF_predict_prob$Target)
+RF_predict_prob$PercentGain <- (RF_predict_prob$CumSum/max(RF_predict_prob$CumSum))*100
+RF_predict_prob$Index <- 1:nrow(RF_predict_prob)
+RF_predict_prob$PercentIndex <- (RF_predict_prob$Index/max(RF_predict_prob$Index))*100
+
+#Building the cumulative gain chart
+ggplot(RF_predict_prob, aes( x = PercentIndex, y = PercentGain)) + 
+  geom_line(color = "blue") +
+  geom_abline(intercept = 0, slope = 1, color = "black", linetype = "dashed") +
+  labs( y = "% Correct Predictions", x = "% Test Instances (Data)", title = "Cummulative Gain Chart", subtitle = "Model = Random Forest")
+ggsave("Cumulative Gain Chart.png", plot = last_plot())
+```
+
+# Distribution of Target Customer
+
+```{r}
+data_1 <- data_np %>%
+  filter(Target == 1)
+summary(data_1$Avg_Account_Balance)
+
+#Creating categorical variable for variable account balance
+summary_balance <- quantile(data_1$Avg_Account_Balance, prob = c(.25, .5, .75), type = 1)
+
+data_1 <- data_1 %>%
+  mutate(Balance_group = case_when(
+    Avg_Account_Balance < quantile(data_1$Avg_Account_Balance, prob = .25, type = 1) ~ "< 661k",
+    Avg_Account_Balance >= quantile(data_1$Avg_Account_Balance, prob = .25, type = 1) & Avg_Account_Balance < quantile(data_1$Avg_Account_Balance, prob = .5, type = 1) ~ "661k - 982.6k",
+    Avg_Account_Balance >= quantile(data_1$Avg_Account_Balance, prob = .5, type = 1) & Avg_Account_Balance < quantile(data_1$Avg_Account_Balance, prob = .75, type = 1) ~ "982.6k - 1,484.1k",
+    Avg_Account_Balance >= quantile(data_1$Avg_Account_Balance, prob = .75, type = 1) ~ ">1,484.1k"
+  ))
+data_1$Balance_group <- as.factor(data_1$Balance_group)
+table(data_1$Balance_group)
+
+#Creating categorical variable for variable vintage
+data_1 <- data_1 %>%
+  mutate(Vintage_group = case_when(
+    Vintage < 36 ~ "<3 yrs",
+    Vintage >= 36 & Vintage < 72 ~ "3-6 yrs",
+    Vintage >= 72 & Vintage < 108 ~ "6-9 yrs",
+    Vintage >= 108 ~ ">9 yrs"
+  ))
+data_1$Vintage_group <- as.factor(data_1$Vintage_group)
+
+#Creating categorical variable for variable age
+data_np <- data_np %>%
+  mutate(Age_group = case_when(
+   Age < 30 ~ "<30",
+   Age >= 30 & Age < 40 ~ "30-39",
+   Age >= 40 & Age < 50 ~ "40-49",
+   Age >= 50 & Age < 60 ~ "50-59",
+   Age >= 60 & Age < 70 ~ "60-69",
+   Age >= 70 & Age < 80 ~ "70-79",
+   Age >= 80 ~ ">80"
+  ))
+data_np$Age_group <- as.factor(data_np$Age_group)
+table(data_np$Credit_Product)
+
+#Bar Chart for vintage group by age group
+ggplot(data_1, aes(x = Age_group, fill = Vintage_group)) + 
+  geom_bar() +
+  labs(x = "Age Group", y = "Frequency", title = "Distribution of Customer Age Group by Years Associated with World Plus")
+
+#Bar Chart for Registration & Occupation variable
+ggplot(data_1, aes(x = as.factor(Registration), fill = Occupation)) + 
+  geom_bar() +
+  labs(x = "Registered on Offered Products", y = "Frequency", title = "Bar Chart on Offered Product Registration by Occupation", caption = "0 = Not Registered, 1 = Registered")
+
+#Bar chart for average account balance based on registration
+ggplot(data_1, aes(x = as.factor(Registration), fill = Balance_group)) + 
+  geom_bar() +
+  labs(x = "Registered on Offered Products", y = "Frequency", title = "Bar Chart on Offered Product Registration by Occupation", caption = "0 = Not Registered, 1 = Registered")
+
+ggplot(data_np, aes(x = Occupation, fill = Account_Type)) + geom_bar()
+
+data_selfemployed <- data_np %>%
+  filter(Occupation == "Self_Employed")
+
+data_enterpreneur <- data_np %>%
+  filter(Occupation == "Entrepreneur")
+
+data_other <- data_np %>%
+  filter(Occupation == "Other")
+
+data_salaried <- data_np %>%
+  filter(Occupation == "Salaried")
+
+table(data_np$Occupation)
+table(data_salaried$Account_Type)
+```
+
+

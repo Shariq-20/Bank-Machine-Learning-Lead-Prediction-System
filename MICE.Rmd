@@ -1,0 +1,168 @@
+```{r}
+
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(ROSE) 
+library(mltools)
+library(data.table)
+library(splitstackshape)
+library(C50)
+library(FSelector)
+library(e1071)
+library(mice)
+
+
+```
+import
+```{r}
+
+data = read.csv("assignment_data.csv" )
+
+str(data)
+
+summary(data)
+
+
+data_np <- data
+
+```
+
+
+Using MICE imputation to replace the dependent values on -1 
+
+
+```{r}
+
+data_np$Dependent <- ifelse(data_np$Dependent == -1, NA, data_np$Dependent)
+
+
+summary(data_np)
+
+unique_values <- unique(data_np$Dependent)
+
+# Print the unique values
+print(unique_values)
+
+( missing_percentage <- sum(is.na(data_np$Dependent))* 100/ length(data_np$Dependent) )
+
+data_np$Dependent <- as.factor(data_np$Dependent)
+data_np$Target <- as.factor(data_np$Target)
+
+data_np$ID <- NULL
+
+imputed_data <- mice(data_np[, -which(names(data_np) == "Target")], 
+                      m = 5, 
+                      maxit = 50, 
+                      method = 'pmm', 
+                      seed = 500)
+data.imputed <- complete(imputed_data, 1)
+table(data$Dependent, useNA='ifany')
+table(data.imputed$Dependent, useNA='ifany')
+
+
+
+
+```
+
+
+# Fixing the NA values in credit product
+
+```{r}
+
+
+( missing_percentage_credit <- sum(is.na(data_np$Credit_Product))* 100/ length(data_np$Credit_Product) )
+
+data_np$Credit_Product <- as.factor(data_np$Credit_Product)
+
+imputed_data_credit <- mice(data_np[, -which(names(data_np) == "Target")], 
+                      m = 5, 
+                      maxit = 50, 
+                      method = 'pmm', 
+                      seed = 500)
+data.imputed_credit <- complete(imputed_data_credit, 1)
+
+table(data_np$Credit_Product, useNA='ifany')
+
+table(data.imputed_credit$Credit_Product, useNA='ifany')
+
+data_np$Dependent <- data.imputed$Dependent
+data_np$Credit_Product <- data.imputed_credit$Credit_Product
+
+
+summary(data_np)
+
+
+```
+
+#Data Partition
+
+
+```{r}
+
+set.seed(123)
+
+# Partition the dataset into training and test sets
+# index keeps the record indices for the training data
+index = createDataPartition(data_np$Target, p = 0.7 , list = FALSE)
+
+# Generate training and test data
+training = data_np[index, ]
+test = data_np[-index, ]
+
+# checking the distribution 
+
+prop.table(table(data_np$Target))
+
+prop.table(table(training$Target))
+
+prop.table(table(test$Target))
+
+
+```
+
+#Run SVM
+
+
+
+```{r}
+
+#install.packages("ROSE")
+library(ROSE)
+
+undersampled_n <- ovun.sample(Target ~ ., data = training, method = "under" , p= 0.5, seed= 1)$data
+
+prop.table(table(undersampled_n$Target))
+
+```
+
+Run SVM 
+
+
+
+```{r}
+
+svm_model <- svm(Target ~., data = undersampled_n , kernal = "radial", scale = TRUE, probability = TRUE)
+
+print(svm_model)
+
+svm_predict <- predict(svm_model, test, probability = TRUE)
+
+a <- confusionMatrix(svm_predict, test$Target, positive = "1", mode = "prec_recall")
+
+print(a)
+
+svm_prob <- attr(svm_predict, "probabilities")
+
+ROC_svm <- roc(test$Target, svm_prob[,2])
+
+auc(ROC_svm)
+
+
+```
+
+```{r}
+set.seed(1)
+tune_out <- e1071::tune(svm, Target~., data = undersampled_n, kernel = "radial", scale = TRUE, ranges = list(cost = c(1, 10, 1000)))
+
+```

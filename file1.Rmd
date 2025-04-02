@@ -1,0 +1,282 @@
+---
+title: "Group Assignment"
+output: html_document
+date: "2023-11-08"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(performanceEstimation)
+# library(dplyr)
+library(tidyverse)
+library(caret)
+library(ROSE) 
+library(mltools)
+library(data.table)
+library(splitstackshape)
+library(C50)
+library(FSelector)
+library(neuralnet)
+library(caret)
+library("e1071")
+library(randomForest)
+library(randomForestSRC)
+library(pROC) 
+
+
+```
+
+1. Title: Lead Conversion
+
+World Plus provides a range of banking products, including loans, investment options, savings accounts, and credit products.
+They aim to implement a lead prediction system to pinpoint prospective customers who will buy their new term deposit product. 
+This system will be used to identify the customers to contact through communication channels to sell the new term deposit product.
+
+They have provided a data set of historic customer records (that collected during a similar product offering). 
+
+The details for the dataset provided below.
+
+2. Number of Instances: 220000 
+
+3. Number of Variables: 16
+
+4. Attribute information:
+	
+  1) ID: customer identification number
+  2) Gender: gender of the customer
+  3) Age: age of the customer in years
+  4) Dependent: whether the customer has a dependent or not
+  5) Marital_Status: marital state (1=married, 2=single, 0 = others)
+  6) Region_Code: code of the region for the customer
+  7) Years_at_Residence: the duration in the current residence (in years)
+  8) Occupation: occupation type of the customer
+  9) Channel_Code: acquisition channel code used to reach the customer when they opened their bank account 
+  10) Vintage: the number of months that the customer has been associated with the company.
+  11) Credit_Product: if the customer has any active credit product (home loan, personal loan, credit card etc.)
+  12) Avg_Account_Balance: average account balance for the customer in last 12 months
+  13) Account_Type: account type of the customer with categories Silver, Gold and Platinum
+  14) Active: if the customer is active in last 3 months
+  15) Registration: whether the customer has visited the bank for the offered product registration (1 = yes; 0 = no)
+  16) Target: whether the customer has purchased the product, 
+	0: Customer did not purchase the product
+	1: Customer purchased the product
+
+## Data Importing & Visualisation 
+
+```{r}
+data_set <- read.csv("assignment_data.csv", stringsAsFactors = TRUE)
+summary(data_set)
+str(data_set)
+
+# removed NA values
+data_set <- na.omit(data_set)
+
+#Removing non-informative features
+data_set$ID <- NULL
+
+#Removing miss-input data in dependent variable
+data_set <- data_set %>%
+  filter(!Dependent == "-1")
+
+```
+
+Credit_product and Active columns have two levels hence we should udpate the columns. In this case, we set yes = 1 and no = 0. Here, 0 represents the not active, and 1 represents that the customer is active.
+
+```{r}
+# Updated the Credit Product Column 
+data_set$Credit_Product <- ifelse(data_set$Credit_Product == "Yes",1, 0)
+
+# Updated the Active Column
+data_set$Active <- ifelse(data_set$Active == "Yes", 1, 0)
+
+# Updated Gender Column to specifying Female as 1 and Male as 0
+data_set$Gender <- ifelse(data_set$Gender == "Female", 1, 0)
+
+
+```
+
+We have levels for the Account type: Platinum > Gold > Silver, since its an ordinal variable we should apply label encoding.
+
+```{r}
+# applied label encoding considering that the Account Type column has ordinal nature 
+data_set$Account_Type <- recode(data_set$Account_Type, "Silver" = 1, "Gold"= 2, "Platinum" = 3)
+```
+
+We will apply one hot encoding for the Occupation column since its a nominal variable. We can also apply one hot encoding for Gender Column but I have just updated the column as it only has two levels. 
+
+```{r}
+## applying one hot encoding to occupation column 
+data_set <- one_hot(as.data.table(data_set), cols = "Occupation")
+
+summary(data_set)
+data_set$Target <- as.factor(data_set$Target)
+str(data_set)
+```
+
+## Data Partition
+
+```{r}
+# Set a seed of 10 by using set.seed() function
+set.seed(10)
+
+# Partition the dataset into training and test sets
+# index keeps the record indices for the training data
+index = createDataPartition(data_set$Target, p = 0.8 , list = FALSE)
+
+# Generate training and test data
+training = data_set[index, ]
+test = data_set[-index, ]
+
+```
+
+## Checking the distribution of the training and test data sets 
+
+```{r}
+# checking the distribution 
+
+prop.table(table(data_set$Target))
+
+prop.table(table(training$Target))
+
+prop.table(table(test$Target))
+
+```
+
+## Sampling 
+
+Due to data imbalance, correction will be applied to the training data set. The sampling method that will be used for the data set is SMOTE. 
+
+```{r}
+training <- smote(Target ~., training, perc.over = 6, perc.under = 1.5)
+prop.table(table(training$Target))
+table(training$Target)
+
+```
+
+## Information Gain
+
+Information gain is used to select the best feature to build the model
+
+```{r}
+weight <- information.gain(Target~., data = training)
+
+print(weight)
+weight$Var_names <- rownames(weight)
+weight <- arrange(weight, -attr_importance)
+
+ggplot(weight, aes(x = reorder(Var_names,-attr_importance), y = attr_importance)) + 
+  geom_bar(stat = "identity") + 
+  theme(axis.text.x = element_text(angle = 90)) + 
+  labs(y = "Information Gain", x = "Independent Variable", title = "Information Gain of Leads Conversion")
+
+```
+## Logistic Regression
+
+```{r}
+# Build a logistic regression model assign it to LogReg
+LogReg <- glm(Target ~. , training, family = "binomial")
+LogReg_pred <- predict(LogReg, test, type="response")
+levels(training$Target)
+# Predict the class 
+LogReg_class <- ifelse(LogReg_pred > 0.5, 1, 0)
+# Save the predictions as factor variables
+LogReg_class <- as.factor(LogReg_class)
+
+# Evaluation
+confusionMatrix(LogReg_class, test$Target, positive = "1", mode = "prec_recall")
+ROC_LogReg <- roc(test$Target, LogReg_pred)
+
+pROC::ggroc(list(LogReg = ROC_LogReg), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+auc(ROC_LogReg)
+
+library(CustomerScoringMetrics)
+# Provide probabilities for the outcome of interest and obtain the gain chart data
+GainTable_LogReg <- cumGainsTable(LogReg_pred, test$Target, resolution = 1/100) 
+```
+
+```{r}
+plot(GainTable_LogReg[,4], col="red", type="l",    
+xlab="Percentage of test instances", ylab="Percentage of identified as lead")
+grid(NULL, lwd = 1)
+
+legend("bottomright",
+c("LogReg"),
+fill=c("red","blue", "green"))
+## Neural Network
+```
+## Decision Tree
+
+```{r}
+library(C50)
+# Build the decision tree 
+tree_spam <- C5.0(Target~., data=training)
+# Check the summary
+summary(tree_spam)
+tree_predict = predict(tree_spam, test, type = "class")
+confusionMatrix(tree_predict, test$Target, positive = "1", mode = "prec_recall")
+tree_predict_prob = predict(tree_spam, test, type = "prob")
+ROC_tree_predict_prob <- roc(test$Target, tree_predict_prob[,2])
+pROC::ggroc(list(LogReg = ROC_LogReg, Tree = ROC_tree_predict_prob), legacy.axes=TRUE)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+auc(ROC_LogReg)
+auc(ROC_tree_predict_prob)
+
+# Provide probabilities for the outcome of interest and obtain the gain chart data
+GainTable_Tree <- cumGainsTable(tree_predict_prob, test$Target, resolution = 1/100) 
+```
+
+```{r}
+plot(GainTable_LogReg[,4], col="red", type="l",    
+xlab="Percentage of test instances", ylab="Percentage of identified invalid claims")
+lines(GainTable_Tree[,4], col="green", type ="l")
+grid(NULL, lwd = 1)
+
+legend("bottomright",
+c("LogReg", "Tree"),
+fill=c("red","blue"))
+```
+```{r}
+library(party)
+ctree_model  <- ctree(Target~. , data =  training)
+
+# Print the model
+print(ctree_model)
+ctree_predict = predict(ctree_model, test, type= "response")
+confusionMatrix(ctree_predict, test$Target, positive = "1", mode = "prec_recall")
+Ctree_predict_prob = predict(ctree_model, test, type = "prob")
+ROC_Ctree_predict_prob <- roc(test$Target, Ctree_predict_prob)
+
+```
+
+
+# Support Vector Machine Model
+
+```{r}
+#taking info gain 
+weights <- information.gain(Target~., training)
+
+# Use the features with positive information gain
+weights_svm <- filter(weights, attr_importance > 0)
+
+# Extract the names of those features with positive info gain
+features <- rownames(weights)
+
+
+# Build an SVM model
+svm_model  <- svm(Target ~. , data =  training, kernel = "radial", scale = TRUE)
+
+# Print svm_model
+print(svm_model)
+
+
+
+```
+
+
+
+
+
